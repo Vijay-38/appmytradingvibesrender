@@ -1037,6 +1037,7 @@ def login():
         if not user.get("password"): return jsonify({"error":"No password set"}),400
         if not check_password_hash(user["password"],password): return jsonify({"error":"Password is incorrect"}),401
         user.pop("password",None)
+        execute_query("UPDATE users SET last_login = CURRENT_TIMESTAMP, last_seen = CURRENT_TIMESTAMP WHERE id = %s", (user.get("id"),), commit=True)
         token=jwt.encode({"user_id":user.get("id")},app.config['JWT_SECRET'],algorithm=app.config['JWT_ALGO'])
         return jsonify({"message":"Login successful","user":user,"token":token}),200
     except Exception as e: return jsonify({"error":"Login failed","details":map_exception_to_error_msg(e)}),500
@@ -1176,6 +1177,9 @@ def google_login():
                 broadcast_fcm_message("New User Joined!", f"@{name} just joined the app!", {"type": "new_user"}, exclude_user_id=user_row["id"])
             except Exception: pass
 
+        # Update last login and seen
+        execute_query("UPDATE users SET last_login = CURRENT_TIMESTAMP, last_seen = CURRENT_TIMESTAMP WHERE id = %s", (user_row.get("id"),), commit=True)
+
         # Generate JWT matching the /login response format
         token = jwt.encode(
             {"user_id": user_row.get("id")},
@@ -1232,9 +1236,16 @@ def temporary_login():
             return jsonify({"message": "Temporary login successful.", "user": user_row, "token": token}), 200
             
         else:
+            # Check if creation is allowed by frontend
+            if data.get("allow_creation") is False:
+                return jsonify({"error": "Daily limit reached. You can only create 3 temporary accounts per day, but you can still login to existing ones."}), 403
+
             # Create a new temporary user
             sw_no = generate_sw_no()
-            name = email.split("@")[0]
+            name = data.get("name")
+            if not name or not str(name).strip():
+                name = email.split("@")[0]
+            name = str(name).strip()
             enc_name = encrypt(name)
             enc_email = encrypt(email)
             enc_sw = encrypt(sw_no)

@@ -3775,6 +3775,7 @@ def get_competition_leaderboard(comp_id):
             WHERE cp.competition_id = %s
             ORDER BY cp.current_balance DESC
         """, (comp_id,), fetch=True)
+        rows = decrypt_rows(rows, ["username"])
         return jsonify({"leaderboard": rows}), 200
     except Exception as e:
         app.logger.exception("Failed to fetch leaderboard")
@@ -3863,6 +3864,7 @@ def get_duels():
                 JOIN users u ON cp.user_id = u.id 
                 WHERE cp.competition_id = %s
             """, (d['id'],), fetch=True)
+            participants = decrypt_rows(participants, ["username"])
             d['participants'] = [dict(p) for p in participants]
             duels.append(d)
         

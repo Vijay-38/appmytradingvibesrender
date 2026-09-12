@@ -3874,6 +3874,30 @@ def get_duels():
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/v1/competitions/duels/create", methods=["POST", "OPTIONS"])
+
+@app.route("/api/v1/competitions/duels/<int:duel_id>", methods=["GET", "OPTIONS"])
+def get_single_duel(duel_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        duel = execute_query("SELECT * FROM competitions WHERE id = %s AND type = 'duel'", (duel_id,), fetch=True)
+        if not duel: return jsonify({"error": "Duel not found"}), 404
+        d = dict(duel[0])
+        
+        participants = execute_query("""
+            SELECT u.username, cp.current_balance 
+            FROM competition_participants cp 
+            JOIN users u ON cp.user_id = u.id 
+            WHERE cp.competition_id = %s
+        """, (duel_id,), fetch=True)
+        participants = decrypt_rows(participants, ["username"])
+        d['participants'] = [dict(p) for p in participants]
+        
+        return jsonify({"duel": d}), 200
+    except Exception as e:
+        app.logger.exception("Failed to fetch single duel")
+        return jsonify({"error": str(e)}), 500
+
 def create_duel():
     if request.method == "OPTIONS":
         return jsonify({}), 200

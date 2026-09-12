@@ -3852,20 +3852,34 @@ def get_duels():
     if request.method == "OPTIONS":
         return jsonify({}), 200
     try:
-        # Fetch duels
-        duels_rows = execute_query("SELECT * FROM competitions WHERE type = 'duel' ORDER BY start_date DESC", (), fetch=True)
+        # Fetch duels (LIMIT 50 for performance)
+        duels_rows = execute_query("SELECT * FROM competitions WHERE type = 'duel' ORDER BY start_date DESC LIMIT 50", (), fetch=True)
+        
+        if not duels_rows:
+            return jsonify({"duels": []}), 200
+            
+        duel_ids = tuple(d['id'] for d in duels_rows)
+        
+        # Fetch all participants in ONE query
+        participants_rows = execute_query("""
+            SELECT cp.competition_id, u.username, cp.current_balance 
+            FROM competition_participants cp 
+            JOIN users u ON cp.user_id = u.id 
+            WHERE cp.competition_id IN %s
+        """, (duel_ids,), fetch=True)
+        
+        participants_rows = decrypt_rows(participants_rows, ["username"])
+        
+        # Group participants by duel_id
+        from collections import defaultdict
+        p_map = defaultdict(list)
+        for p in participants_rows:
+            p_map[p['competition_id']].append(dict(p))
+            
         duels = []
         for duel in duels_rows:
             d = dict(duel)
-            # Fetch participants
-            participants = execute_query("""
-                SELECT u.username, cp.current_balance 
-                FROM competition_participants cp 
-                JOIN users u ON cp.user_id = u.id 
-                WHERE cp.competition_id = %s
-            """, (d['id'],), fetch=True)
-            participants = decrypt_rows(participants, ["username"])
-            d['participants'] = [dict(p) for p in participants]
+            d['participants'] = p_map.get(d['id'], [])
             duels.append(d)
         
         return jsonify({"duels": duels}), 200

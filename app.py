@@ -3781,6 +3781,46 @@ def get_competition_leaderboard(comp_id):
         app.logger.exception("Failed to fetch leaderboard")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/v1/competitions/duels/<int:duel_id>/portfolios", methods=["GET", "OPTIONS"])
+def get_duel_portfolios(duel_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        # Get participants
+        participants = execute_query("""
+            SELECT cp.user_id, u.username, cp.current_balance 
+            FROM competition_participants cp 
+            JOIN users u ON cp.user_id = u.id 
+            WHERE cp.competition_id = %s
+        """, (duel_id,), fetch=True)
+        participants = decrypt_rows(participants, ["username"])
+        
+        # Get all open trades
+        trades = execute_query("SELECT user_id, symbol, buy_price, quantity FROM competition_trades WHERE competition_id = %s AND status = 'OPEN'", (duel_id,), fetch=True)
+        
+        from collections import defaultdict
+        trades_by_user = defaultdict(list)
+        for t in trades:
+            trades_by_user[t['user_id']].append({
+                "symbol": t['symbol'],
+                "buy_price": float(t['buy_price']),
+                "quantity": float(t['quantity'])
+            })
+            
+        portfolios = []
+        for p in participants:
+            portfolios.append({
+                "user_id": p['user_id'],
+                "username": p['username'],
+                "balance": float(p['current_balance']),
+                "open_trades": trades_by_user.get(p['user_id'], [])
+            })
+            
+        return jsonify({"portfolios": portfolios}), 200
+    except Exception as e:
+        app.logger.exception("Failed to fetch portfolios")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/v1/competitions/<int:comp_id>/trade", methods=["POST", "OPTIONS"])
 def execute_competition_trade(comp_id):
     if request.method == "OPTIONS":

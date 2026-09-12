@@ -3438,6 +3438,34 @@ def delete_alert(alert_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+def poll_competitions():
+    while True:
+        try:
+            # Find active duels that have expired (end_date < NOW())
+            expired_duels = execute_query("SELECT * FROM competitions WHERE type = 'duel' AND status = 'active' AND end_date < NOW()", (), fetch=True)
+            for d in expired_duels:
+                duel_id = d['id']
+                wager = float(d['wager_amount'])
+                pot = wager * 2
+                
+                participants = execute_query("SELECT user_id, current_balance FROM competition_participants WHERE competition_id = %s ORDER BY current_balance DESC", (duel_id,), fetch=True)
+                
+                if len(participants) == 2:
+                    winner_id = participants[0]['user_id']
+                    # Settle
+                    execute_query("UPDATE wallets SET balance = balance + %s WHERE user_id = %s", (pot, winner_id), commit=True)
+                    execute_query("UPDATE competitions SET status = 'completed' WHERE id = %s", (duel_id,), commit=True)
+                    
+                    # Notify winner
+                    try:
+                        broadcast_fcm_message("Duel Won! 🏆", f"You won the 1v1 duel and earned ${pot}!", {"type": "duel_win"}, include_user_id=winner_id)
+                    except: pass
+                    
+        except Exception as e:
+            app.logger.exception("poll_competitions error")
+        time.sleep(60) # Check every 60 seconds
+
 def poll_price_alerts():
     import requests
     import time
@@ -3690,9 +3718,246 @@ def track_download():
         return jsonify({"error": "Failed to track download"}), 500
 
 # Start the polling thread
+threading.Thread(target=poll_competitions, daemon=True).start()
 threading.Thread(target=poll_price_alerts, daemon=True).start()
 threading.Thread(target=poll_marketing_campaigns, daemon=True).start()
 
+
+
+# ---------------------------------------------------------------------------
+# COMPETITIONS
+# ---------------------------------------------------------------------------
+@app.route("/api/v1/competitions", methods=["GET", "OPTIONS"])
+def get_competitions():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        rows = execute_query("SELECT * FROM competitions ORDER BY start_date DESC", (), fetch=True)
+        return jsonify({"competitions": rows}), 200
+    except Exception as e:
+        app.logger.exception("Failed to fetch competitions")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/competitions/join", methods=["POST", "OPTIONS"])
+def join_competition():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        auth_uid = get_auth_user_id()
+        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
+        
+        data = request.json or {}
+        comp_id = data.get("competition_id")
+        
+        comp = execute_query("SELECT starting_balance FROM competitions WHERE id = %s AND is_active = TRUE", (comp_id,), fetch=True)
+        if not comp: return jsonify({"error": "Competition not found or inactive"}), 404
+        
+        starting_balance = comp[0]["starting_balance"]
+        
+        execute_query(
+            "INSERT INTO competition_participants (competition_id, user_id, current_balance) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            (comp_id, auth_uid, starting_balance), commit=True
+        )
+        return jsonify({"message": "Joined competition successfully"}), 200
+    except Exception as e:
+        app.logger.exception("Failed to join competition")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/competitions/<int:comp_id>/leaderboard", methods=["GET", "OPTIONS"])
+def get_competition_leaderboard(comp_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        rows = execute_query("""
+            SELECT cp.user_id, u.username, cp.current_balance
+            FROM competition_participants cp
+            JOIN users u ON cp.user_id = u.id
+            WHERE cp.competition_id = %s
+            ORDER BY cp.current_balance DESC
+        """, (comp_id,), fetch=True)
+        return jsonify({"leaderboard": rows}), 200
+    except Exception as e:
+        app.logger.exception("Failed to fetch leaderboard")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/competitions/<int:comp_id>/trade", methods=["POST", "OPTIONS"])
+def execute_competition_trade(comp_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        auth_uid = get_auth_user_id()
+        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
+        
+        data = request.json or {}
+        symbol = data.get("symbol")
+        price = float(data.get("price", 0))
+        quantity = float(data.get("quantity", 0))
+        trade_type = data.get("type") # "BUY" or "SELL"
+        
+        if not symbol or price <= 0 or quantity <= 0 or trade_type not in ["BUY", "SELL"]:
+            return jsonify({"error": "Invalid trade parameters"}), 400
+            
+        participant = execute_query("SELECT current_balance FROM competition_participants WHERE competition_id = %s AND user_id = %s", (comp_id, auth_uid), fetch=True)
+        if not participant: return jsonify({"error": "Not joined in competition"}), 400
+        
+        current_balance = float(participant[0]["current_balance"])
+        total_cost = price * quantity
+        
+        if trade_type == "BUY":
+            if current_balance < total_cost:
+                return jsonify({"error": "Insufficient virtual balance"}), 400
+            
+            # Execute Buy
+            execute_query("UPDATE competition_participants SET current_balance = current_balance - %s WHERE competition_id = %s AND user_id = %s", (total_cost, comp_id, auth_uid), commit=True)
+            execute_query("INSERT INTO competition_trades (competition_id, user_id, symbol, buy_price, quantity, status) VALUES (%s, %s, %s, %s, %s, 'OPEN')", (comp_id, auth_uid, symbol, price, quantity), commit=True)
+        
+        else: # SELL
+            # For simplicity, let's just find an open buy trade of same symbol and close it, calculating profit
+            open_trade = execute_query("SELECT id, buy_price, quantity FROM competition_trades WHERE competition_id = %s AND user_id = %s AND symbol = %s AND status = 'OPEN' ORDER BY id ASC LIMIT 1", (comp_id, auth_uid, symbol), fetch=True)
+            if not open_trade:
+                return jsonify({"error": "No open trade for this symbol"}), 400
+                
+            trade_id = open_trade[0]["id"]
+            buy_price = float(open_trade[0]["buy_price"])
+            trade_quantity = float(open_trade[0]["quantity"])
+            
+            if quantity > trade_quantity:
+                return jsonify({"error": "Cannot sell more than owned"}), 400
+                
+            revenue = price * quantity
+            
+            # Update balance
+            execute_query("UPDATE competition_participants SET current_balance = current_balance + %s WHERE competition_id = %s AND user_id = %s", (revenue, comp_id, auth_uid), commit=True)
+            
+            if quantity == trade_quantity:
+                execute_query("UPDATE competition_trades SET sell_price = %s, status = 'CLOSED' WHERE id = %s", (price, trade_id), commit=True)
+            else:
+                # Partial close (for simplicity, we reduce the quantity of the open trade, and we don't track the partial closed part properly in this simple version. But it's better to just enforce full sell)
+                # To keep it simple: enforcing full sell.
+                return jsonify({"error": "Partial sells are not supported in this version. Please sell the full quantity."}), 400
+
+        return jsonify({"message": f"Trade {trade_type} executed successfully"}), 200
+        
+    except Exception as e:
+        app.logger.exception("Failed to execute trade")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# 1v1 DUELS
+# ---------------------------------------------------------------------------
+@app.route("/api/v1/competitions/duels", methods=["GET", "OPTIONS"])
+def get_duels():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        # Fetch duels
+        duels_rows = execute_query("SELECT * FROM competitions WHERE type = 'duel' ORDER BY start_date DESC", (), fetch=True)
+        duels = []
+        for duel in duels_rows:
+            d = dict(duel)
+            # Fetch participants
+            participants = execute_query("""
+                SELECT u.username, cp.current_balance 
+                FROM competition_participants cp 
+                JOIN users u ON cp.user_id = u.id 
+                WHERE cp.competition_id = %s
+            """, (d['id'],), fetch=True)
+            d['participants'] = [dict(p) for p in participants]
+            duels.append(d)
+        
+        return jsonify({"duels": duels}), 200
+    except Exception as e:
+        app.logger.exception("Failed to fetch duels")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/competitions/duels/create", methods=["POST", "OPTIONS"])
+def create_duel():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        auth_uid = get_auth_user_id()
+        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
+        
+        data = request.json or {}
+        wager_amount = float(data.get("wager_amount", 200))
+        starting_balance = float(data.get("starting_balance", 3000))
+        
+        # Check wallet balance
+        wallet = execute_query("SELECT balance FROM wallets WHERE user_id = %s", (auth_uid,), fetch=True)
+        if not wallet or float(wallet[0]["balance"]) < wager_amount:
+            return jsonify({"error": f"Insufficient wallet balance. You need ${wager_amount} to wager."}), 400
+        
+        # Deduct wager
+        execute_query("UPDATE wallets SET balance = balance - %s WHERE user_id = %s", (wager_amount, auth_uid), commit=True)
+        
+        # Create Duel
+        duel_id_rows = execute_query("""
+            INSERT INTO competitions (name, description, type, wager_amount, max_participants, starting_balance, created_by, status)
+            VALUES ('1v1 Duel', 'Head-to-head paper trading battle', 'duel', %s, 2, %s, %s, 'waiting')
+            RETURNING id;
+        """, (wager_amount, starting_balance, auth_uid), fetch=True, commit=True)
+        
+        duel_id = duel_id_rows[0]['id']
+        
+        # Add creator to participants
+        execute_query(
+            "INSERT INTO competition_participants (competition_id, user_id, current_balance) VALUES (%s, %s, %s)",
+            (duel_id, auth_uid, starting_balance), commit=True
+        )
+        
+        return jsonify({"message": "Duel created successfully", "duel_id": duel_id}), 200
+    except Exception as e:
+        app.logger.exception("Failed to create duel")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/competitions/duels/join", methods=["POST", "OPTIONS"])
+def join_duel():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        auth_uid = get_auth_user_id()
+        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
+        
+        data = request.json or {}
+        duel_id = data.get("duel_id")
+        
+        duel = execute_query("SELECT * FROM competitions WHERE id = %s AND type = 'duel'", (duel_id,), fetch=True)
+        if not duel: return jsonify({"error": "Duel not found"}), 404
+        d = duel[0]
+        
+        if d['status'] != 'waiting':
+            return jsonify({"error": "Duel is no longer waiting for challengers"}), 400
+            
+        # Check if already joined
+        existing = execute_query("SELECT 1 FROM competition_participants WHERE competition_id = %s AND user_id = %s", (duel_id, auth_uid), fetch=True)
+        if existing: return jsonify({"error": "You are already in this duel"}), 400
+        
+        wager_amount = float(d['wager_amount'])
+        
+        # Check wallet balance
+        wallet = execute_query("SELECT balance FROM wallets WHERE user_id = %s", (auth_uid,), fetch=True)
+        if not wallet or float(wallet[0]["balance"]) < wager_amount:
+            return jsonify({"error": f"Insufficient wallet balance. You need ${wager_amount} to wager."}), 400
+            
+        # Deduct wager
+        execute_query("UPDATE wallets SET balance = balance - %s WHERE user_id = %s", (wager_amount, auth_uid), commit=True)
+        
+        # Add to participants
+        execute_query(
+            "INSERT INTO competition_participants (competition_id, user_id, current_balance) VALUES (%s, %s, %s)",
+            (duel_id, auth_uid, d['starting_balance']), commit=True
+        )
+        
+        # Check participant count to activate
+        participants = execute_query("SELECT COUNT(*) as count FROM competition_participants WHERE competition_id = %s", (duel_id,), fetch=True)
+        if participants and participants[0]['count'] >= 2:
+            execute_query("UPDATE competitions SET status = 'active', start_date = NOW(), end_date = NOW() + INTERVAL '3 days' WHERE id = %s", (duel_id,), commit=True)
+            
+        return jsonify({"message": "Joined duel successfully"}), 200
+    except Exception as e:
+        app.logger.exception("Failed to join duel")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

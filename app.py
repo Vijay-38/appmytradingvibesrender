@@ -1078,7 +1078,18 @@ def ensure_chat_rooms():
             
         execute_query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE;", commit=True)
         execute_query("ALTER TABLE messages ALTER COLUMN receiver_id DROP NOT NULL;", commit=True)
-    except Exception: app.logger.exception('Failed to ensure chat_rooms tables/columns')
+        
+        # Add manually missing columns
+        execute_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login TIMESTAMP;", commit=True)
+        execute_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP;", commit=True)
+        execute_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS password VARCHAR(255);", commit=True)
+        execute_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_private BOOLEAN DEFAULT FALSE;", commit=True)
+        execute_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS welcome_reminder_sent BOOLEAN DEFAULT FALSE;", commit=True)
+        execute_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS follow_unlocked BOOLEAN DEFAULT FALSE;", commit=True)
+        execute_query("ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_pictures JSONB DEFAULT '[]'::jsonb;", commit=True)
+        execute_query("ALTER TABLE followers ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'approved';", commit=True)
+        
+    except Exception: app.logger.exception('Failed to ensure tables/columns')
 
 # ---------------------------------------------------------------------------
 # AUTH & USERS
@@ -2744,7 +2755,7 @@ def run_migrations():
         ensure_push_tokens_table()
         ensure_unread_table()
         ensure_chat_rooms()
-        
+
         # Ensure messages table has delete tracking columns (older deployments may lack them)
         try:
             add_column_if_missing("messages", "deleted_by_sender", "BOOLEAN DEFAULT FALSE")

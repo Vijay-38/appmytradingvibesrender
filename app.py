@@ -1033,7 +1033,7 @@ def ensure_chat_rooms():
             );""", commit=True)
             
             execute_query('''CREATE TABLE IF NOT EXISTS competitions (
-                id SERIAL PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 name VARCHAR(255) NOT NULL,
                 description TEXT,
                 type VARCHAR(50) DEFAULT 'global',
@@ -1049,7 +1049,7 @@ def ensure_chat_rooms():
             )''', commit=True)
             execute_query('''CREATE TABLE IF NOT EXISTS competition_participants (
                 id SERIAL PRIMARY KEY,
-                competition_id INT REFERENCES competitions(id) ON DELETE CASCADE,
+                competition_id UUID REFERENCES competitions(id) ON DELETE CASCADE,
                 user_id INT REFERENCES users(id) ON DELETE CASCADE,
                 current_balance DECIMAL(20,2) DEFAULT 0,
                 joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1057,7 +1057,7 @@ def ensure_chat_rooms():
             )''', commit=True)
             execute_query('''CREATE TABLE IF NOT EXISTS competition_trades (
                 id SERIAL PRIMARY KEY,
-                competition_id INT REFERENCES competitions(id) ON DELETE CASCADE,
+                competition_id UUID REFERENCES competitions(id) ON DELETE CASCADE,
                 user_id INT REFERENCES users(id) ON DELETE CASCADE,
                 symbol VARCHAR(50) NOT NULL,
                 buy_price DECIMAL(20,8) NOT NULL,
@@ -1068,7 +1068,7 @@ def ensure_chat_rooms():
             )''', commit=True)
             execute_query('''CREATE TABLE IF NOT EXISTS competition_ledger (
                 id SERIAL PRIMARY KEY,
-                competition_id INT REFERENCES competitions(id) ON DELETE CASCADE,
+                competition_id UUID REFERENCES competitions(id) ON DELETE CASCADE,
                 user_id INT REFERENCES users(id) ON DELETE CASCADE,
                 type VARCHAR(10) NOT NULL,
                 symbol VARCHAR(50) NOT NULL,
@@ -3822,7 +3822,7 @@ def join_competition():
         app.logger.exception("Failed to join competition")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/v1/competitions/<int:comp_id>/leaderboard", methods=["GET", "OPTIONS"])
+@app.route("/api/v1/competitions/<string:comp_id>/leaderboard", methods=["GET", "OPTIONS"])
 def get_competition_leaderboard(comp_id):
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -3840,7 +3840,7 @@ def get_competition_leaderboard(comp_id):
         app.logger.exception("Failed to fetch leaderboard")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/v1/competitions/duels/<int:duel_id>/portfolios", methods=["GET", "OPTIONS"])
+@app.route("/api/v1/competitions/duels/<string:duel_id>/portfolios", methods=["GET", "OPTIONS"])
 def get_duel_portfolios(duel_id):
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -3880,7 +3880,7 @@ def get_duel_portfolios(duel_id):
         app.logger.exception("Failed to fetch portfolios")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/v1/competitions/<int:comp_id>/history", methods=["GET", "OPTIONS"])
+@app.route("/api/v1/competitions/<string:comp_id>/history", methods=["GET", "OPTIONS"])
 def get_competition_history(comp_id):
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -3898,7 +3898,7 @@ def get_competition_history(comp_id):
         app.logger.exception("Failed to fetch competition history")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/v1/competitions/<int:comp_id>/trade", methods=["POST", "OPTIONS"])
+@app.route("/api/v1/competitions/<string:comp_id>/trade", methods=["POST", "OPTIONS"])
 def execute_competition_trade(comp_id):
     if request.method == "OPTIONS":
         return jsonify({}), 200
@@ -4019,7 +4019,7 @@ def get_duels():
 
 @app.route("/api/v1/competitions/duels/create", methods=["POST", "OPTIONS"])
 
-@app.route("/api/v1/competitions/duels/<int:duel_id>", methods=["GET", "OPTIONS"])
+@app.route("/api/v1/competitions/duels/<string:duel_id>", methods=["GET", "OPTIONS"])
 def get_single_duel(duel_id):
     if request.method == "OPTIONS":
         return jsonify({}), 200

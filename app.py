@@ -970,32 +970,7 @@ def ensure_unread_table():
             count INTEGER DEFAULT 0, PRIMARY KEY (receiver_id, sender_id));""", commit=True)
     except Exception: app.logger.exception('Failed to ensure unread_counts table')
 
-def ensure_feed_tables():
-    try:
-        execute_query("""CREATE TABLE IF NOT EXISTS feed_posts (
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            content TEXT,
-            trade_symbol VARCHAR(50),
-            trade_type VARCHAR(20),
-            trade_qty NUMERIC,
-            trade_price NUMERIC,
-            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );""", commit=True)
-        execute_query("""CREATE TABLE IF NOT EXISTS feed_likes (
-            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-            post_id INTEGER REFERENCES feed_posts(id) ON DELETE CASCADE,
-            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (user_id, post_id)
-        );""", commit=True)
-        execute_query("""CREATE TABLE IF NOT EXISTS feed_comments (
-            id SERIAL PRIMARY KEY,
-            post_id INTEGER REFERENCES feed_posts(id) ON DELETE CASCADE,
-            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );""", commit=True)
-    except Exception: app.logger.exception('Failed to ensure feed tables')
+
 
 def ensure_chat_rooms():
     try:
@@ -1014,24 +989,6 @@ def ensure_chat_rooms():
         except Exception: pass
         
         try:
-            execute_query("""CREATE TABLE IF NOT EXISTS chat_rooms (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100),
-                created_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                is_public BOOLEAN DEFAULT FALSE,
-                icon_url TEXT,
-                description TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );""", commit=True)
-            
-            execute_query("""CREATE TABLE IF NOT EXISTS chat_room_members (
-                room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE,
-                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                role VARCHAR(20) DEFAULT 'member',
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (room_id, user_id)
-            );""", commit=True)
-            
             execute_query('''CREATE TABLE IF NOT EXISTS competitions (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 name VARCHAR(255) NOT NULL,
@@ -1078,7 +1035,47 @@ def ensure_chat_rooms():
             )''', commit=True)
         except Exception:
             pass
-        
+            
+        try:
+            execute_query("""CREATE TABLE IF NOT EXISTS wallets (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                balance DECIMAL(20,2) DEFAULT 1000.0,
+                total_earned DECIMAL(20,2) DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", commit=True)
+            execute_query("""CREATE TABLE IF NOT EXISTS price_alerts (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                symbol VARCHAR(50),
+                target_price DECIMAL(20,8),
+                condition VARCHAR(20),
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", commit=True)
+            execute_query("""CREATE TABLE IF NOT EXISTS chat_room_bans (
+                room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                banned_by INTEGER,
+                reason TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (room_id, user_id)
+            )""", commit=True)
+            execute_query("""CREATE TABLE IF NOT EXISTS instagram_follows (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                ig_username VARCHAR(100),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", commit=True)
+            execute_query("""CREATE TABLE IF NOT EXISTS instagram_milestone_rewards (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                milestone INTEGER,
+                reward_amount DECIMAL(20,2),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""", commit=True)
+        except Exception:
+            pass
+            
         execute_query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE;", commit=True)
         execute_query("ALTER TABLE messages ALTER COLUMN receiver_id DROP NOT NULL;", commit=True)
     except Exception: app.logger.exception('Failed to ensure chat_rooms tables/columns')
@@ -2747,8 +2744,7 @@ def run_migrations():
         ensure_push_tokens_table()
         ensure_unread_table()
         ensure_chat_rooms()
-        ensure_feed_tables()
-
+        
         # Ensure messages table has delete tracking columns (older deployments may lack them)
         try:
             add_column_if_missing("messages", "deleted_by_sender", "BOOLEAN DEFAULT FALSE")
@@ -3620,138 +3616,6 @@ def poll_marketing_campaigns():
                     
         except Exception as e:
             app.logger.error(f"Error in poll_marketing_campaigns: {e}")
-
-# ---------------------------------------------------------------------------
-# SOCIAL FEED
-# ---------------------------------------------------------------------------
-@app.route("/api/v1/feed", methods=["GET"])
-def get_feed():
-    try:
-        auth_uid = get_auth_user_id()
-        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
-        
-        posts = execute_query("""
-            SELECT p.id, p.content, p.trade_symbol, p.trade_type, p.trade_qty, p.trade_price, p.created_at,
-                   u.username, u.profile_picture_url,
-                   (u.google_id IS NOT NULL) as is_verified,
-                   (SELECT COUNT(*) FROM feed_likes WHERE post_id = p.id) as likes_count,
-                   (SELECT COUNT(*) FROM feed_comments WHERE post_id = p.id) as comments_count,
-                   EXISTS(SELECT 1 FROM feed_likes WHERE post_id = p.id AND user_id = %s) as is_liked
-            FROM feed_posts p
-            JOIN users u ON p.user_id = u.id
-            ORDER BY p.created_at DESC
-            LIMIT 50
-        """, (auth_uid,), fetch=True)
-        
-        posts = decrypt_rows(posts, ["username"])
-        
-        # Convert created_at to string and format results
-        for p in posts:
-            if p.get('created_at'):
-                p['created_at'] = p['created_at'].isoformat() + "Z"
-            # Ensure boolean for is_liked and is_verified
-            p['is_liked'] = bool(p['is_liked'])
-            p['is_verified'] = bool(p['is_verified'])
-            
-        return jsonify(posts), 200
-    except Exception as e:
-        app.logger.exception("Failed to get feed")
-        return jsonify({"error": "Failed to get feed"}), 500
-
-@app.route("/api/v1/feed", methods=["POST"])
-def create_feed_post():
-    try:
-        auth_uid = get_auth_user_id()
-        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
-        
-        data = request.json or {}
-        content = data.get("content")
-        trade_symbol = data.get("trade_symbol")
-        trade_type = data.get("trade_type")
-        trade_qty = data.get("trade_qty")
-        trade_price = data.get("trade_price")
-        
-        if not content and not trade_symbol:
-            return jsonify({"error": "Content or trade data is required"}), 400
-            
-        post_id = execute_query("""
-            INSERT INTO feed_posts (user_id, content, trade_symbol, trade_type, trade_qty, trade_price)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (auth_uid, content, trade_symbol, trade_type, trade_qty, trade_price), fetch=True, commit=True)
-        
-        return jsonify({"message": "Post created successfully", "id": post_id[0]["id"] if post_id else None}), 201
-    except Exception as e:
-        app.logger.exception("Failed to create post")
-        return jsonify({"error": "Failed to create post"}), 500
-
-@app.route("/api/v1/feed/<int:post_id>/like", methods=["POST"])
-def toggle_like(post_id):
-    try:
-        auth_uid = get_auth_user_id()
-        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
-        
-        # Check if already liked
-        liked = execute_query("SELECT 1 FROM feed_likes WHERE user_id = %s AND post_id = %s", (auth_uid, post_id), fetch=True)
-        if liked:
-            execute_query("DELETE FROM feed_likes WHERE user_id = %s AND post_id = %s", (auth_uid, post_id), commit=True)
-            action = "unliked"
-        else:
-            execute_query("INSERT INTO feed_likes (user_id, post_id) VALUES (%s, %s)", (auth_uid, post_id), commit=True)
-            action = "liked"
-        return jsonify({"message": f"Post {action} successfully"}), 200
-    except Exception as e:
-        app.logger.exception("Failed to toggle like")
-        return jsonify({"error": "Failed to toggle like"}), 500
-
-@app.route("/api/v1/feed/<int:post_id>/comments", methods=["GET"])
-def get_comments(post_id):
-    try:
-        auth_uid = get_auth_user_id()
-        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
-        
-        comments = execute_query("""
-            SELECT c.id, c.content, c.created_at, u.username, u.profile_picture_url,
-                   (u.google_id IS NOT NULL) as is_verified
-            FROM feed_comments c
-            JOIN users u ON c.user_id = u.id
-            WHERE c.post_id = %s
-            ORDER BY c.created_at ASC
-        """, (post_id,), fetch=True)
-        
-        comments = decrypt_rows(comments, ["username"])
-        
-        for c in comments:
-            if c.get('created_at'):
-                c['created_at'] = c['created_at'].isoformat() + "Z"
-            c['is_verified'] = bool(c['is_verified'])
-            
-        return jsonify(comments), 200
-    except Exception as e:
-        app.logger.exception("Failed to get comments")
-        return jsonify({"error": "Failed to get comments"}), 500
-
-@app.route("/api/v1/feed/<int:post_id>/comments", methods=["POST"])
-def create_comment(post_id):
-    try:
-        auth_uid = get_auth_user_id()
-        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
-        
-        data = request.json or {}
-        content = data.get("content")
-        
-        if not content:
-            return jsonify({"error": "Content is required"}), 400
-            
-        execute_query("""
-            INSERT INTO feed_comments (post_id, user_id, content)
-            VALUES (%s, %s, %s)
-        """, (post_id, auth_uid, content), commit=True)
-        
-        return jsonify({"message": "Comment created successfully"}), 201
-    except Exception as e:
-        app.logger.exception("Failed to create comment")
-        return jsonify({"error": "Failed to create comment"}), 500
 
 # ---------------------------------------------------------------------------
 # APP DOWNLOAD TRACKING

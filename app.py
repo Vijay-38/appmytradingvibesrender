@@ -3830,7 +3830,10 @@ def execute_competition_trade(comp_id):
         if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
         
         data = request.json or {}
-        symbol = data.get("symbol")
+        symbol = data.get("symbol", "").upper()
+        if symbol and symbol != "USDT" and not symbol.endswith("USDT"):
+            symbol = f"{symbol}USDT"
+        
         price = float(data.get("price", 0))
         quantity = float(data.get("quantity", 0))
         trade_type = data.get("type") # "BUY" or "SELL"

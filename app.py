@@ -3853,16 +3853,13 @@ def execute_competition_trade(comp_id):
             execute_query("INSERT INTO competition_trades (competition_id, user_id, symbol, buy_price, quantity, status) VALUES (%s, %s, %s, %s, %s, 'OPEN')", (comp_id, auth_uid, symbol, price, quantity), commit=True)
         
         else: # SELL
-            # For simplicity, let's just find an open buy trade of same symbol and close it, calculating profit
-            open_trade = execute_query("SELECT id, buy_price, quantity FROM competition_trades WHERE competition_id = %s AND user_id = %s AND symbol = %s AND status = 'OPEN' ORDER BY id ASC LIMIT 1", (comp_id, auth_uid, symbol), fetch=True)
-            if not open_trade:
+            # Support partial sells and multiple lots to match frontend holdings aggregation
+            open_trades = execute_query("SELECT id, buy_price, quantity FROM competition_trades WHERE competition_id = %s AND user_id = %s AND symbol = %s AND status = 'OPEN' ORDER BY id ASC", (comp_id, auth_uid, symbol), fetch=True)
+            if not open_trades:
                 return jsonify({"error": "No open trade for this symbol"}), 400
                 
-            trade_id = open_trade[0]["id"]
-            buy_price = float(open_trade[0]["buy_price"])
-            trade_quantity = float(open_trade[0]["quantity"])
-            
-            if quantity > trade_quantity:
+            total_owned = sum(float(t["quantity"]) for t in open_trades)
+            if quantity > total_owned + 0.000001:
                 return jsonify({"error": "Cannot sell more than owned"}), 400
                 
             revenue = price * quantity
@@ -3870,12 +3867,21 @@ def execute_competition_trade(comp_id):
             # Update balance
             execute_query("UPDATE competition_participants SET current_balance = current_balance + %s WHERE competition_id = %s AND user_id = %s", (revenue, comp_id, auth_uid), commit=True)
             
-            if quantity == trade_quantity:
-                execute_query("UPDATE competition_trades SET sell_price = %s, status = 'CLOSED' WHERE id = %s", (price, trade_id), commit=True)
-            else:
-                # Partial close (for simplicity, we reduce the quantity of the open trade, and we don't track the partial closed part properly in this simple version. But it's better to just enforce full sell)
-                # To keep it simple: enforcing full sell.
-                return jsonify({"error": "Partial sells are not supported in this version. Please sell the full quantity."}), 400
+            remaining_to_sell = quantity
+            for t in open_trades:
+                if remaining_to_sell <= 0:
+                    break
+                t_qty = float(t["quantity"])
+                if remaining_to_sell >= t_qty:
+                    # Close this lot completely
+                    execute_query("UPDATE competition_trades SET sell_price = %s, status = 'CLOSED' WHERE id = %s", (price, t["id"]), commit=True)
+                    remaining_to_sell -= t_qty
+                else:
+                    # Partial close: split the lot
+                    new_open_qty = t_qty - remaining_to_sell
+                    execute_query("UPDATE competition_trades SET quantity = %s WHERE id = %s", (new_open_qty, t["id"]), commit=True)
+                    execute_query("INSERT INTO competition_trades (competition_id, user_id, symbol, buy_price, sell_price, quantity, status) VALUES (%s, %s, %s, %s, %s, %s, 'CLOSED')", (comp_id, auth_uid, symbol, t["buy_price"], price, remaining_to_sell), commit=True)
+                    remaining_to_sell = 0
 
         return jsonify({"message": f"Trade {trade_type} executed successfully"}), 200
         
@@ -4037,6 +4043,39 @@ def join_duel():
         return jsonify({"message": "Joined duel successfully"}), 200
     except Exception as e:
         app.logger.exception("Failed to join duel")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/v1/competitions/duels/cancel", methods=["POST", "OPTIONS"])
+def cancel_duel():
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        auth_uid = get_auth_user_id()
+        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
+        
+        data = request.json or {}
+        duel_id = data.get("duel_id")
+        
+        duel = execute_query("SELECT * FROM competitions WHERE id = %s AND type = 'duel'", (duel_id,), fetch=True)
+        if not duel: return jsonify({"error": "Duel not found"}), 404
+        d = duel[0]
+        
+        if str(d.get('created_by')) != str(auth_uid):
+            return jsonify({"error": "Only the creator can cancel this duel"}), 403
+            
+        if d['status'] != 'waiting':
+            return jsonify({"error": "Only waiting duels can be cancelled"}), 400
+            
+        # Refund wager
+        execute_query("UPDATE wallets SET balance = balance + %s WHERE user_id = %s", (d['wager_amount'], auth_uid), commit=True)
+        
+        # Delete dependencies and room
+        execute_query("DELETE FROM competition_participants WHERE competition_id = %s", (duel_id,), commit=True)
+        execute_query("DELETE FROM competitions WHERE id = %s", (duel_id,), commit=True)
+        
+        return jsonify({"message": "Duel cancelled and wager refunded"}), 200
+    except Exception as e:
+        app.logger.exception("Failed to cancel duel")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':

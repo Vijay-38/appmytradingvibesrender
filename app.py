@@ -1013,12 +1013,71 @@ def ensure_chat_rooms():
         try: add_column_if_missing("chat_rooms", "description", "TEXT")
         except Exception: pass
         
-        execute_query("""CREATE TABLE IF NOT EXISTS chat_room_members (
-            room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE,
-            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-            joined_at TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (room_id, user_id)
-        );""", commit=True)
+        try:
+            execute_query("""CREATE TABLE IF NOT EXISTS chat_rooms (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100),
+                created_by INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                is_public BOOLEAN DEFAULT FALSE,
+                icon_url TEXT,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );""", commit=True)
+            
+            execute_query("""CREATE TABLE IF NOT EXISTS chat_room_members (
+                room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE,
+                user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                role VARCHAR(20) DEFAULT 'member',
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (room_id, user_id)
+            );""", commit=True)
+            
+            execute_query('''CREATE TABLE IF NOT EXISTS competitions (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                description TEXT,
+                type VARCHAR(50) DEFAULT 'global',
+                wager_amount DECIMAL(20,2) DEFAULT 0,
+                max_participants INT DEFAULT 2,
+                starting_balance DECIMAL(20,2) DEFAULT 10000,
+                created_by INT REFERENCES users(id),
+                status VARCHAR(50) DEFAULT 'waiting',
+                is_active BOOLEAN DEFAULT TRUE,
+                start_date TIMESTAMP,
+                end_date TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''', commit=True)
+            execute_query('''CREATE TABLE IF NOT EXISTS competition_participants (
+                id SERIAL PRIMARY KEY,
+                competition_id INT REFERENCES competitions(id) ON DELETE CASCADE,
+                user_id INT REFERENCES users(id) ON DELETE CASCADE,
+                current_balance DECIMAL(20,2) DEFAULT 0,
+                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(competition_id, user_id)
+            )''', commit=True)
+            execute_query('''CREATE TABLE IF NOT EXISTS competition_trades (
+                id SERIAL PRIMARY KEY,
+                competition_id INT REFERENCES competitions(id) ON DELETE CASCADE,
+                user_id INT REFERENCES users(id) ON DELETE CASCADE,
+                symbol VARCHAR(50) NOT NULL,
+                buy_price DECIMAL(20,8) NOT NULL,
+                sell_price DECIMAL(20,8),
+                quantity DECIMAL(20,8) NOT NULL,
+                status VARCHAR(20) DEFAULT 'OPEN',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''', commit=True)
+            execute_query('''CREATE TABLE IF NOT EXISTS competition_ledger (
+                id SERIAL PRIMARY KEY,
+                competition_id INT REFERENCES competitions(id) ON DELETE CASCADE,
+                user_id INT REFERENCES users(id) ON DELETE CASCADE,
+                type VARCHAR(10) NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                price DECIMAL(20,8) NOT NULL,
+                qty DECIMAL(20,8) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''', commit=True)
+        except Exception:
+            pass
         
         execute_query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS room_id INTEGER REFERENCES chat_rooms(id) ON DELETE CASCADE;", commit=True)
         execute_query("ALTER TABLE messages ALTER COLUMN receiver_id DROP NOT NULL;", commit=True)
@@ -3821,6 +3880,24 @@ def get_duel_portfolios(duel_id):
         app.logger.exception("Failed to fetch portfolios")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/v1/competitions/<int:comp_id>/history", methods=["GET", "OPTIONS"])
+def get_competition_history(comp_id):
+    if request.method == "OPTIONS":
+        return jsonify({}), 200
+    try:
+        auth_uid = get_auth_user_id()
+        if not auth_uid: return jsonify({"error": "Unauthorized"}), 401
+        
+        trades = execute_query("SELECT id, type, symbol, price, qty, created_at as timestamp FROM competition_ledger WHERE competition_id = %s AND user_id = %s ORDER BY created_at DESC", (comp_id, auth_uid), fetch=True)
+        for t in trades:
+            t["price"] = float(t["price"])
+            t["qty"] = float(t["qty"])
+            t["timestamp"] = t["timestamp"].isoformat()
+        return jsonify(trades), 200
+    except Exception as e:
+        app.logger.exception("Failed to fetch competition history")
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/v1/competitions/<int:comp_id>/trade", methods=["POST", "OPTIONS"])
 def execute_competition_trade(comp_id):
     if request.method == "OPTIONS":
@@ -3885,6 +3962,10 @@ def execute_competition_trade(comp_id):
                     execute_query("UPDATE competition_trades SET quantity = %s WHERE id = %s", (new_open_qty, t["id"]), commit=True)
                     execute_query("INSERT INTO competition_trades (competition_id, user_id, symbol, buy_price, sell_price, quantity, status) VALUES (%s, %s, %s, %s, %s, %s, 'CLOSED')", (comp_id, auth_uid, symbol, t["buy_price"], price, remaining_to_sell), commit=True)
                     remaining_to_sell = 0
+
+        # Log the transaction to the competition ledger
+        execute_query("INSERT INTO competition_ledger (competition_id, user_id, type, symbol, price, qty) VALUES (%s, %s, %s, %s, %s, %s)",
+                      (comp_id, auth_uid, trade_type, symbol, price, quantity), commit=True)
 
         return jsonify({"message": f"Trade {trade_type} executed successfully"}), 200
         

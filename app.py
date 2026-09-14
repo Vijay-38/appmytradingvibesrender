@@ -2755,7 +2755,7 @@ def run_migrations():
         ensure_push_tokens_table()
         ensure_unread_table()
         ensure_chat_rooms()
-
+        
         # Ensure messages table has delete tracking columns (older deployments may lack them)
         try:
             add_column_if_missing("messages", "deleted_by_sender", "BOOLEAN DEFAULT FALSE")
@@ -3892,8 +3892,6 @@ def get_duels():
         app.logger.exception("Failed to fetch duels")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/v1/competitions/duels/create", methods=["POST", "OPTIONS"])
-
 @app.route("/api/v1/competitions/duels/<string:duel_id>", methods=["GET", "OPTIONS"])
 def get_single_duel(duel_id):
     if request.method == "OPTIONS":
@@ -3917,6 +3915,7 @@ def get_single_duel(duel_id):
         app.logger.exception("Failed to fetch single duel")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/v1/competitions/duels/create", methods=["POST", "OPTIONS"])
 def create_duel():
     if request.method == "OPTIONS":
         return jsonify({}), 200
